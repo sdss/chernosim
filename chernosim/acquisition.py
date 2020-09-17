@@ -16,6 +16,7 @@ import astropy.table
 import matplotlib.patches
 import matplotlib.pyplot
 import numpy
+import pandas
 import yaml
 
 from cherno.astrometry import AstrometryNet
@@ -392,11 +393,16 @@ def add_noise(data, fwhm, detection_rate=0.95, non_detection_factor=1,
 
 
 def _do_one_field(fields, config_data, observatory, output_dir,
-                  n_attempts, field_idx):
+                  n_attempts, field_idx, data=None):
     """Simulates one field."""
 
-    boresight = fields[field_idx]
     field_id = field_idx + 1
+    boresight = fields[field_id]
+
+    field_dir = output_dir / f'{field_id:05d}'
+    if field_dir.exists():
+        shutil.rmtree(field_dir)
+    field_dir.mkdir(parents=True, exist_ok=True)
 
     numpy.random.seed(config_data['seed'] + field_id)
 
@@ -405,17 +411,21 @@ def _do_one_field(fields, config_data, observatory, output_dir,
         astrometry_cfg = (pathlib.Path(__file__).parent.absolute() /
                           'etc/astrometry.cfg')
 
-    field_dir = output_dir / f'{field_id:05d}'
+    if not data or field_id not in data:
+        star_data = prepare_data(boresight,
+                                 observatory=observatory,
+                                 g_mag_range=config_data['g_mag_range'],
+                                 apply_proper_motion=True,
+                                 epoch=config_data['epoch'],
+                                 plot=False,
+                                 shape=config_data['gfa']['shape'],
+                                 pixel_size=config_data['gfa']['pixel_size'],
+                                 database_params=config_data['database'],
+                                 **config_data[observatory])
+    else:
+        star_data = pandas.read_hdf(data[field_id])
 
-    data = prepare_data(boresight, observatory=observatory,
-                        g_mag_range=config_data['g_mag_range'],
-                        apply_proper_motion=True, epoch=config_data['epoch'],
-                        plot=False, shape=config_data['gfa']['shape'],
-                        pixel_size=config_data['gfa']['pixel_size'],
-                        database_params=config_data['database'],
-                        **config_data[observatory])
-
-    data.to_hdf(field_dir / f'data_{field_id:05d}.h5', 'data')
+    star_data.to_hdf(field_dir / f'data_{field_id:05d}.h5', 'data')
 
     gfa_rot = config_data[observatory]['gfa_rot']
     gfa_centres = {gfa_id: get_gfa_centre(gfa_rot[gfa_id],
@@ -432,7 +442,7 @@ def _do_one_field(fields, config_data, observatory, output_dir,
         log_config['input'] = {}
         log_input = log_config['input']
 
-        log_input['boresight'] = boresight.tolist()
+        log_input['boresight'] = boresight
         log_input['observatory'] = observatory
         log_input['field_id'] = field_id
         log_input['attempt_id'] = n_att
@@ -446,7 +456,7 @@ def _do_one_field(fields, config_data, observatory, output_dir,
         fwhm = numpy.random.uniform(*config_data['fwhm_range'])
         log_input['fwhm'] = fwhm
 
-        att_data = data.copy()
+        att_data = star_data.copy()
         att_data = add_noise(
             att_data, fwhm,
             detection_rate=config_data['detection_rate'],
@@ -506,13 +516,14 @@ def _do_one_field(fields, config_data, observatory, output_dir,
             scale_units='arcsecperpix',
             dir=att_dir)
 
-        astrometry_net.run(gfa_xyls,
-                           stdout=att_dir / f'stdout{prefix}',
-                           stderr=att_dir / f'stderr{prefix}')
+        prc = astrometry_net.run(gfa_xyls,
+                                 stdout=att_dir / f'stdout{prefix}',
+                                 stderr=att_dir / f'stderr{prefix}')
 
         log_config['output'] = {}
         log_output = log_config['output']
         log_output['solved'] = {i: False for i in gfa_ids}
+        log_output['solve_field_time'] = prc.time
 
         att_data['ra_solved'] = numpy.nan
         att_data['dec_solved'] = numpy.nan
@@ -549,17 +560,14 @@ def _do_one_field(fields, config_data, observatory, output_dir,
         att_data.to_hdf(att_dir / f'data{prefix}.out.h5', 'data')
 
 
-def simulate(n_fields, output_dir, observatory='apo', config_file=None,
-             n_cpus=None, n_attempts=10):
+class Simulation:
     """Runs a simulation using multiprocessing.
-
-    Note that this function will not work from an interactive interpreter
-    since it uses multiprocessing.
 
     Parameters
     ----------
-    n_fields : int
-        Number of uniformly distributed fields to test.
+    fields : int or list
+        Number of uniformly distributed fields to test or a list of field
+        centres.
     output_dir : str
         The root of the directory structure where all the output files will
         be stored.
@@ -567,39 +575,78 @@ def simulate(n_fields, output_dir, observatory='apo', config_file=None,
         The observatory, either ``'apo'`` or ``'lco'``.
     config_file : str
         The path to the configuration file for the simulation.
-    n_cpus : int
-        Number of CPUs to use. If not defined, uses all the CPUs.
     n_attempts : int
         Number of attempts, with randomised noise, to try per field.
 
     """
 
-    n_cpus = n_cpus or multiprocessing.cpu_count()
+    def __init__(self, fields, output_dir, observatory='apo',
+                 config_file=None, n_attempts=10):
 
-    output_dir = pathlib.Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+        self.observatory = observatory
+        self.n_attempts = n_attempts
 
-    if config_file:
-        config_data = read_yaml_file(config_file)
-    else:
-        config_data = config
-    config_data = config_data.copy()
+        self.output_dir = pathlib.Path(output_dir)
 
-    numpy.random.seed(config_data['seed'])
+        if config_file:
+            config_data = read_yaml_file(config_file)
+        else:
+            config_data = config
 
-    fields = get_uniform_ra_dec(n_fields)
+        self.config_data = config_data.copy()
 
-    fields_list = fields.tolist()
-    config_data['fields'] = {fid + 1: fields_list[fid]
-                             for fid in range(len(fields_list))}
-    config_data['n_attamps'] = n_attempts
-    config_data['observatory'] = observatory
+        numpy.random.seed(config_data['seed'])
 
-    with open(output_dir / 'config.yaml', 'w') as out:
-        out.write(yaml.dump(config_data))
+        if isinstance(fields, int):
+            fields = get_uniform_ra_dec(fields).tolist()
+            self.fields = {fid + 1: fields[fid] for fid in range(len(fields))}
+        elif isinstance(fields, dict):
+            self.fields = fields
 
-    f = functools.partial(_do_one_field, fields, config_data,
-                          observatory, output_dir, n_attempts)
+        self._data = None
 
-    with multiprocessing.Pool(processes=n_cpus) as pool:
-        pool.map(f, range(len(fields)))
+    @classmethod
+    def from_simulation(cls, path, *args, **kwargs):
+        """Loads fields and data from a different simulation."""
+
+        path = pathlib.Path(path)
+        config_path = path / 'config.yaml'
+
+        config = yaml.safe_load(open(config_path))
+        fields = config['fields']
+
+        data = {field_id: (path / f'{field_id:05d}' / f'data_{field_id:05d}.h5')
+                for field_id in range(1, len(fields) + 1)}
+
+        obj = cls(fields, *args, **kwargs)
+        obj._data = data
+
+        return obj
+
+    def run(self, n_cpus=None):
+        """Run the simulation.
+
+        Parameters
+        ----------
+        n_cpus : int
+            Number of CPUs to use. If not defined, uses all the CPUs.
+
+        """
+
+        self.config_data['fields'] = self.fields
+        self.config_data['n_attamps'] = self.n_attempts
+        self.config_data['observatory'] = self.observatory
+
+        n_cpus = n_cpus or multiprocessing.cpu_count()
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        with open(self.output_dir / 'config.yaml', 'w') as out:
+            out.write(yaml.dump(self.config_data))
+
+        f = functools.partial(_do_one_field, self.fields,
+                              self.config_data, self.observatory,
+                              self.output_dir, self.n_attempts,
+                              data=self._data)
+
+        with multiprocessing.Pool(processes=n_cpus) as pool:
+            pool.map(f, range(len(self.fields)))

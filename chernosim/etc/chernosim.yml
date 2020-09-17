@@ -31,7 +31,7 @@ non_detection_factor: 1
 mag_thres: 13
 mag_column: phot_g_mean_mag
 
-astrometry.cfg: /home/albireo/astrometry.cfg
+astrometry.cfg: /mnt/mako-big/acquisition_simulations/astrometry.cfg
 
 seed: 12345
 epoch: 2021.5
