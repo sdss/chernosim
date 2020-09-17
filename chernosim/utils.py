@@ -9,14 +9,13 @@
 import astropy.wcs
 import numpy
 import pandas
-
-from sdssdb.peewee.sdss5db import catalogdb
+import psycopg2
 
 from . import config
 
 
 def query_field(boresight, r1=None, r2=None, observatory='apo',
-                g_mag_range=None, epoch=None):
+                g_mag_range=None, database_params=None):
     """Selects Gaia DR2 stars for a field, from the database.
 
     Parameters
@@ -31,9 +30,9 @@ def query_field(boresight, r1=None, r2=None, observatory='apo',
         The observatory, used to load the default configuration for the GFAs.
     g_mag_range : tuple
         The range of Gaia DR2 G magnitudes used to select stars.
-    epoch : float
-        If provided, propagates the coordinates using the catalogue proper
-        motions.
+    database_params : dict
+        A dictionary of database parameters to create the connection. Can
+        include ``user``, ``host``, ``port``, and ``dbname``.
 
     Returns
     -------
@@ -41,8 +40,6 @@ def query_field(boresight, r1=None, r2=None, observatory='apo',
         A dataframe with the selected stars.
 
     """
-
-    assert catalogdb.database.connected, 'Database is not connected.'
 
     obs_data = config[observatory]
     r1 = r1 or obs_data['r1']
@@ -58,7 +55,18 @@ def query_field(boresight, r1=None, r2=None, observatory='apo',
     query = query.format(ra=boresight[0], dec=boresight[1], r1=r1, r2=r2,
                          g_min=g_mag_range[0], g_max=g_mag_range[1])
 
-    return pandas.read_sql(query, catalogdb.database)
+    if database_params is None:
+        database_params = config['database']
+
+    conn_str = ''
+    for key in database_params:
+        conn_str += f'{key}={database_params[key]} '
+
+    connection = psycopg2.connect(conn_str)
+    data = pandas.read_sql(query, connection)
+    connection.close()
+
+    return data
 
 
 def get_gfa_centre(rot, boresight, observatory='apo', r1=None, r2=None):

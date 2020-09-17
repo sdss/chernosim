@@ -17,15 +17,21 @@ lco:
     gfa_rot: [0, 60, 120, 180, 240, 300]
     plate_scale: 330.275
 
+database:
+    user: albireo
+    port: 5433
+    dbname: sdss5db
+
 g_mag_range: [13, 16]
 
 fwhm_range: [0.5, 3]
+
 detection_rate: 0.98
 non_detection_factor: 1
 mag_thres: 13
 mag_column: phot_g_mean_mag
 
-astrometry.cfg: null
+astrometry.cfg: /home/albireo/astrometry.cfg
 
 seed: 12345
 epoch: 2021.5
