@@ -19,7 +19,6 @@ import numpy
 import yaml
 
 from cherno.astrometry import AstrometryNet
-from sdssdb.peewee.sdss5db import database
 from sdsstools import read_yaml_file
 
 from . import config
@@ -178,7 +177,8 @@ def radec_to_xy(data, wcs=None, **kwargs):
 def prepare_data(boresight, data=None, observatory='apo', r1=None, r2=None,
                  g_mag_range=None, phi=None, gfa_rot=None, shape=None,
                  pixel_size=None, plate_scale=None, plot=False,
-                 apply_proper_motion=False, ref_epoch=2015.5, epoch=False):
+                 apply_proper_motion=False, ref_epoch=2015.5, epoch=False,
+                 database_params=None):
     """Prepares data to be matched by astrometry.net.
 
     Performs the following steps:
@@ -235,6 +235,8 @@ def prepare_data(boresight, data=None, observatory='apo', r1=None, r2=None,
         The epoch of the catalogue, as a Julian year.
     epoch : float
         The epoch of the observation, as a Julian year.
+    database_params : dict
+        A dictionary of database parameters to be passed to `.query_field`.
 
     Returns
     -------
@@ -250,7 +252,8 @@ def prepare_data(boresight, data=None, observatory='apo', r1=None, r2=None,
 
     if data is None:
         data = query_field(boresight, r1=r1, r2=r2, observatory=observatory,
-                           g_mag_range=g_mag_range)
+                           g_mag_range=g_mag_range,
+                           database_params=database_params)
 
     data = select_stars(data, boresight, observatory=observatory,
                         r1=r1, r2=r2, phi=phi, gfa_rot=gfa_rot)
@@ -261,8 +264,8 @@ def prepare_data(boresight, data=None, observatory='apo', r1=None, r2=None,
         data['dec_orig'] = data.dec
         pmra = data.pmra / 1000 / 3600. / numpy.cos(numpy.radians(data.dec))
         pmdec = data.pmdec / 1000 / 3600.
-        data.ra += pmra * (epoch - 2015.5)
-        data.dec += pmdec * (epoch - 2015.5)
+        data.ra += pmra * (epoch - ref_epoch)
+        data.dec += pmdec * (epoch - ref_epoch)
 
     obs_data = config[observatory]
     gfa_rot = gfa_rot or obs_data['gfa_rot']
@@ -389,11 +392,8 @@ def add_noise(data, fwhm, detection_rate=0.95, non_detection_factor=1,
 
 
 def _do_one_field(fields, config_data, observatory, output_dir,
-                  n_attempts, field_idx, database_profile=None):
+                  n_attempts, field_idx):
     """Simulates one field."""
-
-    if database_profile:
-        database.set_profile(database_profile)
 
     boresight = fields[field_idx]
     field_id = field_idx + 1
@@ -412,7 +412,10 @@ def _do_one_field(fields, config_data, observatory, output_dir,
                         apply_proper_motion=True, epoch=config_data['epoch'],
                         plot=False, shape=config_data['gfa']['shape'],
                         pixel_size=config_data['gfa']['pixel_size'],
+                        database_params=config_data['database'],
                         **config_data[observatory])
+
+    data.to_hdf(field_dir / f'data_{field_id:05d}.h5', 'data')
 
     gfa_rot = config_data[observatory]['gfa_rot']
     gfa_centres = {gfa_id: get_gfa_centre(gfa_rot[gfa_id],
@@ -426,10 +429,9 @@ def _do_one_field(fields, config_data, observatory, output_dir,
         prefix = f'_{field_id:05d}_{n_att:03d}'
 
         log_config = {}
-        log_config['simulation_config'] = config_data.copy()
-
         log_config['input'] = {}
         log_input = log_config['input']
+
         log_input['boresight'] = boresight.tolist()
         log_input['observatory'] = observatory
         log_input['field_id'] = field_id
@@ -490,7 +492,7 @@ def _do_one_field(fields, config_data, observatory, output_dir,
 
         astrometry_net = AstrometryNet()
         astrometry_net.configure(
-            backend_config=att_dir / astrometry_cfg.name,
+            backend_config=att_dir / pathlib.Path(astrometry_cfg).name,
             width=config_data['gfa']['shape'][0],
             height=config_data['gfa']['shape'][1],
             sort_column=config_data['mag_column'],
@@ -510,24 +512,29 @@ def _do_one_field(fields, config_data, observatory, output_dir,
 
         log_config['output'] = {}
         log_output = log_config['output']
+        log_output['solved'] = {i: False for i in gfa_ids}
 
         att_data['ra_solved'] = numpy.nan
         att_data['dec_solved'] = numpy.nan
         att_data['separation'] = numpy.nan
 
-        log_output['solved'] = {i: False for i in gfa_ids}
         for gfa_id in gfa_ids:
+
             if not (att_dir / f'gfa{gfa_id}{prefix}.solved').exists():
                 continue
+
             log_output['solved'][gfa_id] = True
+
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 solved_wcs = astropy.wcs.WCS(str(att_dir /
                                                  f'gfa{gfa_id}{prefix}.wcs'))
 
             gfa_idx = att_data.gfa == gfa_id
+
             radec_solved = solved_wcs.wcs_pix2world(
                 att_data.loc[gfa_idx, ['x', 'y']].to_numpy(), 0)
+
             att_data.loc[gfa_idx, 'ra_solved'] = radec_solved[:, 0]
             att_data.loc[gfa_idx, 'dec_solved'] = radec_solved[:, 1]
             att_data.loc[gfa_idx, 'separation'] = sky_separation(
@@ -543,7 +550,7 @@ def _do_one_field(fields, config_data, observatory, output_dir,
 
 
 def simulate(n_fields, output_dir, observatory='apo', config_file=None,
-             n_cpus=None, n_attempts=10, database_profile=None):
+             n_cpus=None, n_attempts=10):
     """Runs a simulation using multiprocessing.
 
     Note that this function will not work from an interactive interpreter
@@ -564,8 +571,6 @@ def simulate(n_fields, output_dir, observatory='apo', config_file=None,
         Number of CPUs to use. If not defined, uses all the CPUs.
     n_attempts : int
         Number of attempts, with randomised noise, to try per field.
-    database_profile : str
-        The database profile to use, if any.
 
     """
 
@@ -577,15 +582,24 @@ def simulate(n_fields, output_dir, observatory='apo', config_file=None,
     if config_file:
         config_data = read_yaml_file(config_file)
     else:
-        config_data = config.copy()
+        config_data = config
+    config_data = config_data.copy()
 
     numpy.random.seed(config_data['seed'])
 
     fields = get_uniform_ra_dec(n_fields)
 
+    fields_list = fields.tolist()
+    config_data['fields'] = {fid + 1: fields_list[fid]
+                             for fid in range(len(fields_list))}
+    config_data['n_attamps'] = n_attempts
+    config_data['observatory'] = observatory
+
+    with open(output_dir / 'config.yaml', 'w') as out:
+        out.write(yaml.dump(config_data))
+
     f = functools.partial(_do_one_field, fields, config_data,
-                          observatory, output_dir, n_attempts,
-                          database_profile=database_profile)
+                          observatory, output_dir, n_attempts)
 
     with multiprocessing.Pool(processes=n_cpus) as pool:
         pool.map(f, range(len(fields)))
