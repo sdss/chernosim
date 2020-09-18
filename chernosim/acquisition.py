@@ -387,7 +387,9 @@ def add_noise(data, fwhm, detection_rate=0.95, non_detection_factor=1,
     delta_mag = data[mag_column] - mag_thres
     delta_mag[delta_mag < 0] = 0.
 
-    detection_rate -= numpy.log10(delta_mag) * non_detection_factor
+    detection_rate = numpy.tile(detection_rate, len(data))
+    detection_rate[delta_mag > 0] -= (numpy.log10(delta_mag[delta_mag > 0]) *
+                                      non_detection_factor)
 
     non_detected = numpy.random.uniform(size=n) > detection_rate
     data.loc[:, 'detected'] = ~non_detected
