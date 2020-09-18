@@ -476,7 +476,7 @@ def _do_one_field(fields, config_data, observatory, output_dir,
 
         att_data.to_hdf(att_dir / f'data{prefix}.in.h5', 'data')
 
-        gfa_xyls = []
+        gfa_xyls = {}
 
         for gfa_id in att_data.gfa.unique():
 
@@ -488,7 +488,7 @@ def _do_one_field(fields, config_data, observatory, output_dir,
 
             gfa_table.write(att_dir / f'gfa{gfa_id}{prefix}.xyls',
                             format='fits', overwrite=True)
-            gfa_xyls.append(str(att_dir / f'gfa{gfa_id}{prefix}.xyls'))
+            gfa_xyls[gfa_id] = str(att_dir / f'gfa{gfa_id}{prefix}.xyls')
 
             gfa_id = int(gfa_id)  # To avoid YAML serialising as numpy object
             log_input['n_stars_per_gfa'][gfa_id] = n_stars_gfa
@@ -503,6 +503,9 @@ def _do_one_field(fields, config_data, observatory, output_dir,
         pixel_size = config_data['gfa']['pixel_size']
         pixel_scale = pixel_size / 1000. / plate_scale * 3600.  # In arcsec
 
+        log_config['output'] = {}
+        log_output = log_config['output']
+
         astrometry_net = AstrometryNet()
         astrometry_net.configure(
             backend_config=att_dir / pathlib.Path(astrometry_cfg).name,
@@ -511,22 +514,54 @@ def _do_one_field(fields, config_data, observatory, output_dir,
             sort_column=config_data['mag_column'],
             sort_ascending=True,
             no_plots=True,
-            ra=boresight[0] + (numpy.random.uniform() - 0.5),
-            dec=boresight[1] + (numpy.random.uniform() - 0.5),
-            radius=2,
             scale_low=pixel_scale * 0.9,
             scale_high=pixel_scale * 1.1,
             scale_units='arcsecperpix',
+            radius=config_data['search_params']['radius'],
             dir=att_dir)
 
-        prc = astrometry_net.run(gfa_xyls,
-                                 stdout=att_dir / f'stdout{prefix}',
-                                 stderr=att_dir / f'stderr{prefix}')
+        if config_data['search_params']['centre_on_gfa'] is False:
 
-        log_config['output'] = {}
-        log_output = log_config['output']
+            ra_error = 2 * (numpy.random.uniform() - 0.5)
+            ra_error *= config_data['search_params']['ra_error']
+            dec_error = 2 * (numpy.random.uniform() - 0.5)
+            dec_error *= config_data['search_params']['dec_error']
+
+            prc = astrometry_net.run(list(gfa_xyls.values()),
+                                     stdout=att_dir / f'stdout{prefix}',
+                                     stderr=att_dir / f'stderr{prefix}',
+                                     ra=boresight[0] + ra_error,
+                                     dec=boresight[1] + dec_error)
+
+            log_output['solve_field_time'] = prc.time
+
+        else:
+
+            prc_time = 0.0
+
+            for gfa_id in gfa_xyls:
+
+                ra_error = 2 * (numpy.random.uniform() - 0.5)
+                ra_error *= config_data['search_params']['ra_error']
+                dec_error = 2 * (numpy.random.uniform() - 0.5)
+                dec_error *= config_data['search_params']['dec_error']
+
+                gfa_centre = gfa_centres[gfa_id]
+
+                stdout = att_dir / f'stdout_gfa{gfa_id}{prefix}'
+                stderr = att_dir / f'stderr_gfa{gfa_id}{prefix}'
+
+                prc = astrometry_net.run([gfa_xyls[gfa_id]],
+                                         stdout=stdout,
+                                         stderr=stderr,
+                                         ra=gfa_centre[0] + ra_error,
+                                         dec=gfa_centre[1] + dec_error)
+
+                prc_time += prc.time
+
+            log_output['solve_field_time'] = prc_time
+
         log_output['solved'] = {i: False for i in gfa_ids}
-        log_output['solve_field_time'] = prc.time
 
         att_data['ra_solved'] = numpy.nan
         att_data['dec_solved'] = numpy.nan
@@ -635,6 +670,9 @@ class Simulation:
             Number of CPUs to use. If not defined, uses all the CPUs.
 
         """
+
+        if self.output_dir.exists():
+            raise RuntimeError(f'The output path {self.output_dir!s} exists.')
 
         self.config_data['fields'] = self.fields
         self.config_data['n_attamps'] = self.n_attempts

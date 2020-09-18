@@ -31,6 +31,12 @@ non_detection_factor: 1
 mag_thres: 13
 mag_column: phot_g_mean_mag
 
+search_params:
+    centre_on_gfa: false
+    ra_error: 0.5
+    dec_error: 0.5
+    radius: 2
+
 astrometry.cfg: /mnt/mako-big/acquisition_simulations/astrometry.cfg
 
 seed: 12345
