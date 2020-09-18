@@ -430,6 +430,8 @@ def _do_one_field(fields, config_data, observatory, output_dir,
     else:
         star_data = pandas.read_hdf(data[field_id])
 
+    star_data.sort_values(config_data['mag_column'], inplace=True)
+
     star_data.to_hdf(field_dir / f'data_{field_id:05d}.h5', 'data')
 
     gfa_rot = config_data[observatory]['gfa_rot']
@@ -513,8 +515,6 @@ def _do_one_field(fields, config_data, observatory, output_dir,
             backend_config=att_dir / pathlib.Path(astrometry_cfg).name,
             width=config_data['gfa']['shape'][0],
             height=config_data['gfa']['shape'][1],
-            sort_column=config_data['mag_column'],
-            sort_ascending=True,
             no_plots=True,
             scale_low=pixel_scale * 0.9,
             scale_high=pixel_scale * 1.1,
