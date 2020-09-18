@@ -267,6 +267,9 @@ def prepare_data(boresight, data=None, observatory='apo', r1=None, r2=None,
         pmdec = data.pmdec / 1000 / 3600.
         data.ra += pmra * (epoch - ref_epoch)
         data.dec += pmdec * (epoch - ref_epoch)
+        # Deal with NaN in pmra/pmdec
+        data.ra = data.ra.fillna(data.ra_orig)
+        data.dec = data.dec.fillna(data.dec_orig)
 
     obs_data = config[observatory]
     gfa_rot = gfa_rot or obs_data['gfa_rot']
