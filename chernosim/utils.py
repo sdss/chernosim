@@ -15,7 +15,7 @@ from . import config
 
 
 def query_field(boresight, r1=None, r2=None, observatory='apo',
-                g_mag_range=None, database_params=None):
+                mag_range=None, mag_column=None, database_params=None):
     """Selects Gaia DR2 stars for a field, from the database.
 
     Parameters
@@ -28,8 +28,10 @@ def query_field(boresight, r1=None, r2=None, observatory='apo',
         degrees.
     observatory : str
         The observatory, used to load the default configuration for the GFAs.
-    g_mag_range : tuple
-        The range of Gaia DR2 G magnitudes used to select stars.
+    mag_range : tuple
+        The range of magnitudes used to select stars.
+    mag_column : str
+        The name of the magnitude column to query.
     database_params : dict
         A dictionary of database parameters to create the connection. Can
         include ``user``, ``host``, ``port``, and ``dbname``.
@@ -44,16 +46,20 @@ def query_field(boresight, r1=None, r2=None, observatory='apo',
     obs_data = config[observatory]
     r1 = r1 or obs_data['r1']
     r2 = r2 or obs_data['r2']
-    g_mag_range = g_mag_range or config['g_mag_range']
+    mag_range = mag_range or config['mag_range']
+    mag_column = mag_column or config['mag_column']
 
-    query = ('SELECT source_id, ra, dec, phot_g_mean_mag, pmra, pmdec '
+    query = ('WITH x AS MATERIALIZED (SELECT source_id, ra, dec, '
+             '{mag_column}, pmra, pmdec '
              'FROM gaia_dr2_source WHERE '
              'q3c_radial_query(ra, dec, {ra}, {dec}, {r2}) AND '
-             'NOT q3c_radial_query(ra, dec, {ra}, {dec}, {r1}) '
-             'AND phot_g_mean_mag > {g_min} AND phot_g_mean_mag < {g_max};')
+             'NOT q3c_radial_query(ra, dec, {ra}, {dec}, {r1})) '
+             'SELECT * FROM x WHERE {mag_column} > {g_min} AND '
+             '{mag_column} < {g_max};')
 
     query = query.format(ra=boresight[0], dec=boresight[1], r1=r1, r2=r2,
-                         g_min=g_mag_range[0], g_max=g_mag_range[1])
+                         g_min=mag_range[0], g_max=mag_range[1],
+                         mag_column=mag_column)
 
     if database_params is None:
         database_params = config['database']

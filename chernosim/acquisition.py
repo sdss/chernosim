@@ -17,6 +17,7 @@ import matplotlib.patches
 import matplotlib.pyplot
 import numpy
 import pandas
+import tqdm
 import yaml
 
 from cherno.astrometry import AstrometryNet
@@ -95,6 +96,11 @@ def select_stars(data, boresight, observatory='apo',
 
     # Remove stars that ar not in the GFA annulus
     data = data.loc[(sep > r1) & (sep < r2)]
+
+    if len(data) == 0:
+        data.loc[:, ['gfa', 'theta']] = numpy.nan
+        return data
+
     sep = sep[(sep > r1) & (sep < r2)]
     sep_rad = numpy.radians(sep)
 
@@ -176,8 +182,8 @@ def radec_to_xy(data, wcs=None, **kwargs):
 
 
 def prepare_data(boresight, data=None, observatory='apo', r1=None, r2=None,
-                 g_mag_range=None, phi=None, gfa_rot=None, shape=None,
-                 pixel_size=None, plate_scale=None, plot=False,
+                 mag_range=None, mag_column=None, phi=None, gfa_rot=None,
+                 shape=None, pixel_size=None, plate_scale=None, plot=False,
                  apply_proper_motion=False, ref_epoch=2015.5, epoch=False,
                  database_params=None):
     """Prepares data to be matched by astrometry.net.
@@ -212,8 +218,10 @@ def prepare_data(boresight, data=None, observatory='apo', r1=None, r2=None,
     r1,r2 : float
         The internal and external radii along which the GFAs are located, in
         degrees.
-    g_mag_range : tuple
-        The range of Gaia DR2 G magnitudes used to select stars.
+    mag_range : tuple
+        The range of magnitudes used to select stars.
+    mag_column : str
+        The name of the magnitude column to query.
     phi : float
         The angle subtended by each GFA, in degrees.
     gfa_rot : list
@@ -253,7 +261,7 @@ def prepare_data(boresight, data=None, observatory='apo', r1=None, r2=None,
 
     if data is None:
         data = query_field(boresight, r1=r1, r2=r2, observatory=observatory,
-                           g_mag_range=g_mag_range,
+                           mag_range=mag_range, mag_column=mag_column,
                            database_params=database_params)
 
     data = select_stars(data, boresight, observatory=observatory,
@@ -370,6 +378,9 @@ def add_noise(data, fwhm, detection_rate=0.95, non_detection_factor=1,
 
     """
 
+    data['x_no_noise'] = data.loc[:, 'x']
+    data['y_no_noise'] = data.loc[:, 'y']
+
     sigma = fwhm / (2.0 * numpy.sqrt(2 * numpy.log(2)))
 
     n = data.shape[0]
@@ -398,15 +409,21 @@ def add_noise(data, fwhm, detection_rate=0.95, non_detection_factor=1,
 
 
 def _do_one_field(fields, config_data, observatory, output_dir,
-                  n_attempts, field_idx, data=None):
+                  n_attempts, field_id, data=None, overwrite=False):
     """Simulates one field."""
 
-    field_id = field_idx + 1
     boresight = fields[field_id]
 
-    field_dir = output_dir / f'{field_id:05d}'
+    plate_scale = config_data[observatory]['plate_scale']
+    pixel_size = config_data['gfa']['pixel_size']
+    pixel_scale = pixel_size / 1000. / plate_scale * 3600.  # In arcsec
+
+    field_dir = (output_dir / f'{field_id:05d}').absolute()
     if field_dir.exists():
-        shutil.rmtree(field_dir)
+        if overwrite:
+            shutil.rmtree(field_dir)
+        else:
+            raise RuntimeError(f'{field_dir!s} already exists.')
     field_dir.mkdir(parents=True, exist_ok=True)
 
     numpy.random.seed(config_data['seed'] + field_id)
@@ -419,7 +436,8 @@ def _do_one_field(fields, config_data, observatory, output_dir,
     if not data or field_id not in data:
         star_data = prepare_data(boresight,
                                  observatory=observatory,
-                                 g_mag_range=config_data['g_mag_range'],
+                                 mag_range=config_data['mag_range'],
+                                 mag_column=config_data['mag_column'],
                                  apply_proper_motion=True,
                                  epoch=config_data['epoch'],
                                  plot=False,
@@ -430,9 +448,15 @@ def _do_one_field(fields, config_data, observatory, output_dir,
     else:
         star_data = pandas.read_hdf(data[field_id])
 
-    star_data.sort_values(config_data['mag_column'], inplace=True)
+    mag_column = config_data['mag_column']
+    star_data.sort_values(mag_column, inplace=True)
 
     star_data.to_hdf(field_dir / f'data_{field_id:05d}.h5', 'data')
+
+    if 'limit_mag_range' in config_data and config_data['limit_mag_range']:
+        limit_mag_range = config_data['limit_mag_range']
+        star_data = star_data[(star_data[mag_column] >= limit_mag_range[0]) &
+                              (star_data[mag_column] <= limit_mag_range[1])]
 
     gfa_rot = config_data[observatory]['gfa_rot']
     gfa_centres = {gfa_id: get_gfa_centre(gfa_rot[gfa_id],
@@ -465,7 +489,7 @@ def _do_one_field(fields, config_data, observatory, output_dir,
 
         att_data = star_data.copy()
         att_data = add_noise(
-            att_data, fwhm,
+            att_data, fwhm / pixel_scale,
             detection_rate=config_data['detection_rate'],
             non_detection_factor=config_data['non_detection_factor'],
             mag_thres=config_data['mag_thres'],
@@ -502,10 +526,6 @@ def _do_one_field(fields, config_data, observatory, output_dir,
 
         with open(att_dir / f'config{prefix}.yaml', 'w') as out:
             out.write(yaml.dump(log_config))
-
-        plate_scale = config_data[observatory]['plate_scale']
-        pixel_size = config_data['gfa']['pixel_size']
-        pixel_scale = pixel_size / 1000. / plate_scale * 3600.  # In arcsec
 
         log_config['output'] = {}
         log_output = log_config['output']
@@ -620,11 +640,8 @@ class Simulation:
 
     """
 
-    def __init__(self, fields, output_dir, observatory='apo',
+    def __init__(self, fields, output_dir, observatory=None,
                  config_file=None, n_attempts=10):
-
-        self.observatory = observatory
-        self.n_attempts = n_attempts
 
         self.output_dir = pathlib.Path(output_dir)
 
@@ -635,35 +652,43 @@ class Simulation:
 
         self.config_data = config_data.copy()
 
+        self.observatory = observatory or self.config_data['observatory']
+        self.n_attempts = n_attempts
+
         numpy.random.seed(config_data['seed'])
 
         if isinstance(fields, int):
             fields = get_uniform_ra_dec(fields).tolist()
-            self.fields = {fid + 1: fields[fid] for fid in range(len(fields))}
+            self.fields = {fid + 1: list(map(float, fields[fid]))
+                           for fid in range(len(fields))}
         elif isinstance(fields, dict):
             self.fields = fields
+        elif isinstance(fields, (tuple, list)):
+            self.fields = {fid + 1: list(map(float, fields[fid]))
+                           for fid in range(len(fields))}
 
         self._data = None
 
     @classmethod
-    def from_simulation(cls, path, *args, **kwargs):
+    def from_simulation(cls, path, *args, fields=None, **kwargs):
         """Loads fields and data from a different simulation."""
 
         path = pathlib.Path(path)
         config_path = path / 'config.yaml'
 
-        config = yaml.safe_load(open(config_path))
-        fields = config['fields']
+        if fields is None:
+            config = yaml.safe_load(open(config_path))
+            fields = config['fields']
 
         data = {field_id: (path / f'{field_id:05d}' / f'data_{field_id:05d}.h5')
-                for field_id in range(1, len(fields) + 1)}
+                for field_id in fields}
 
         obj = cls(fields, *args, **kwargs)
         obj._data = data
 
         return obj
 
-    def run(self, n_cpus=None):
+    def run(self, n_cpus=None, overwrite=False):
         """Run the simulation.
 
         Parameters
@@ -673,9 +698,6 @@ class Simulation:
 
         """
 
-        if self.output_dir.exists():
-            raise RuntimeError(f'The output path {self.output_dir!s} exists.')
-
         self.config_data['fields'] = self.fields
         self.config_data['n_attamps'] = self.n_attempts
         self.config_data['observatory'] = self.observatory
@@ -683,13 +705,20 @@ class Simulation:
         n_cpus = n_cpus or multiprocessing.cpu_count()
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.output_dir / 'config.yaml', 'w') as out:
+
+        config_path = self.output_dir / 'config.yaml'
+        if config_path.exists() and not overwrite:
+            raise RuntimeError(f'{config_path!s} already exists.')
+
+        with open(config_path, 'w') as out:
             out.write(yaml.dump(self.config_data))
 
         f = functools.partial(_do_one_field, self.fields,
                               self.config_data, self.observatory,
                               self.output_dir, self.n_attempts,
-                              data=self._data)
+                              data=self._data, overwrite=overwrite)
 
-        with multiprocessing.Pool(processes=n_cpus) as pool:
-            pool.map(f, range(len(self.fields)))
+        with tqdm.tqdm(total=len(self.fields)) as pbar:
+            with multiprocessing.Pool(processes=n_cpus) as pool:
+                for __ in pool.imap(f, self.fields.keys()):
+                    pbar.update()
