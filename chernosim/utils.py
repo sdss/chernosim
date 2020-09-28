@@ -227,3 +227,21 @@ def sky_separation(ra1, dec1, ra2, dec2):
             numpy.cos(numpy.radians(ra1 - ra2))
         )
     )
+
+
+def get_wcs_rotation(wcs):
+    """Returns the rotation of a WCS frame.
+
+    Parameters
+    ----------
+    wcs : ~astropy.wcs.WCS
+        The `~astropy.wcs.WCS` object.
+
+    Return
+    ------
+    float
+        The rotation angle, in degrees.
+
+    """
+
+    return numpy.degrees(numpy.arctan2(wcs.wcs.cd[1, 0], wcs.wcs.cd[0, 0]))

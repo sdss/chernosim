@@ -6,6 +6,7 @@
 # @Filename: acquisition.py
 # @License: BSD 3-clause (http://www.opensource.org/licenses/BSD-3-Clause)
 
+import collections
 import functools
 import multiprocessing
 import pathlib
@@ -13,6 +14,7 @@ import shutil
 import warnings
 
 import astropy.table
+import astropy.wcs
 import matplotlib.patches
 import matplotlib.pyplot
 import numpy
@@ -24,8 +26,8 @@ from cherno.astrometry import AstrometryNet
 from sdsstools import read_yaml_file
 
 from . import config
-from .utils import (create_gfa_wcs, get_gfa_centre,
-                    get_uniform_ra_dec, query_field, sky_separation)
+from .utils import (create_gfa_wcs, get_gfa_centre, get_uniform_ra_dec,
+                    get_wcs_rotation, query_field, sky_separation)
 
 
 def select_stars(data, boresight, observatory='apo',
@@ -609,7 +611,8 @@ def _do_one_field(fields, config_data, observatory, output_dir,
             att_data.loc[gfa_idx, 'ra_solved'] = radec_solved[:, 0]
             att_data.loc[gfa_idx, 'dec_solved'] = radec_solved[:, 1]
             att_data.loc[gfa_idx, 'separation'] = sky_separation(
-                att_data.loc[gfa_idx, 'ra'], att_data.loc[gfa_idx, 'dec'],
+                att_data.loc[gfa_idx, 'ra'],
+                att_data.loc[gfa_idx, 'dec'],
                 att_data.loc[gfa_idx, 'ra_solved'],
                 att_data.loc[gfa_idx, 'dec_solved'],
             )
@@ -699,7 +702,7 @@ class Simulation:
         """
 
         self.config_data['fields'] = self.fields
-        self.config_data['n_attamps'] = self.n_attempts
+        self.config_data['n_attempts'] = self.n_attempts
         self.config_data['observatory'] = self.observatory
 
         n_cpus = n_cpus or multiprocessing.cpu_count()
@@ -722,3 +725,113 @@ class Simulation:
             with multiprocessing.Pool(processes=n_cpus) as pool:
                 for __ in pool.imap(f, self.fields.keys()):
                     pbar.update()
+
+
+def collate_results(path, show_progress=False):
+    """Collates the results of a simulation.
+
+    Parameters
+    ----------
+    path : str
+        The path to a completed simulation.
+    show_progress : bool
+        Whether to show a progress bar.
+
+    Returns
+    -------
+    dict
+        A dictionary with the collated results of the simulation.
+
+    """
+
+    Row = collections.namedtuple('Row', ('observatory', 'field',
+                                         'attempt', 'gfa',
+                                         'field_ra', 'field_dec',
+                                         'fwhm', 'n_stars', 'n_detected',
+                                         'min_mag', 'max_mag',
+                                         'solved', 'solve_time_avg',
+                                         'rot', 'true_rot', 'rmse'))
+
+    path = pathlib.Path(path)
+
+    config = yaml.safe_load(open(path / 'config.yaml'))
+
+    obs = config['observatory']
+    gfa_rot = config[obs]['gfa_rot']
+
+    fields = config['fields']
+    n_attempts = config.get('n_attempts') or config.get('n_attamps')
+    mag_column = config['mag_column']
+
+    rows = [None] * len(fields) * n_attempts * len(gfa_rot)
+
+    if show_progress:
+        pbar = tqdm.tqdm(total=len(fields))
+    else:
+        pbar = None
+
+    n = 0
+
+    for field_id in fields:
+        field_str = f'{field_id:05d}'
+
+        for att in range(1, n_attempts + 1):
+
+            att_str = f'{att:03d}'
+            prefix = f'{field_str}_{att_str}'
+
+            att_path = path / field_str / att_str
+            att_config = yaml.safe_load(open(att_path / f'config_{prefix}.yaml'))
+
+            data_out = pandas.read_hdf(att_path / f'data_{prefix}.out.h5')
+            solve_time_avg = (att_config['output']['solve_field_time'] /
+                              len(att_config['input']['gfa_centres']))
+
+            for gfa in att_config['input']['gfa_centres']:
+
+                gfa_data = data_out.loc[data_out.gfa == gfa]
+
+                solved = att_config['output']['solved'][gfa]
+
+                if solved:
+
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        wcs = astropy.wcs.WCS(str(att_path /
+                                                  f'gfa{gfa}_{prefix}.wcs'))
+                        rot = get_wcs_rotation(wcs)
+                        rot = -rot % 360
+
+                    sep = gfa_data.separation
+                    rmse = numpy.sqrt(numpy.sum((sep * 3600.)**2) / len(sep))
+
+                else:
+
+                    rot = None
+                    rmse = None
+
+                row = Row(
+                    observatory=obs,
+                    field=field_id,
+                    attempt=att,
+                    gfa=gfa,
+                    field_ra=fields[field_id][0],
+                    field_dec=fields[field_id][1],
+                    fwhm=att_config['input']['fwhm'],
+                    n_stars=att_config['input']['n_stars_per_gfa'][gfa],
+                    n_detected=att_config['input']['n_detected_per_gfa'][gfa],
+                    min_mag=gfa_data[mag_column].min(),
+                    max_mag=gfa_data[mag_column].max(),
+                    solved=solved,
+                    solve_time_avg=solve_time_avg,
+                    rot=rot,
+                    true_rot=gfa_rot[gfa],
+                    rmse=rmse)
+
+                rows[n] = row
+                n += 1
+
+        if pbar:
+            pbar.update()
+
+    return pandas.DataFrame(rows[0:n]).set_index(['field', 'attempt', 'gfa'])
