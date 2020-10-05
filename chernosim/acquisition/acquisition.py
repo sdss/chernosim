@@ -25,7 +25,7 @@ import yaml
 from cherno.astrometry import AstrometryNet
 from sdsstools import read_yaml_file
 
-from . import config
+from .. import config
 from .utils import (create_gfa_wcs, get_gfa_centre, get_uniform_ra_dec,
                     get_wcs_rotation, query_field, sky_separation)
 

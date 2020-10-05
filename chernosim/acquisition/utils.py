@@ -11,7 +11,7 @@ import numpy
 import pandas
 import psycopg2
 
-from . import config
+from .. import config
 
 
 def query_field(boresight, r1=None, r2=None, observatory='apo',
